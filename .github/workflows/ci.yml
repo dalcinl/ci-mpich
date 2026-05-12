@@ -1,0 +1,65 @@
+name: ci
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches:
+      - main
+      - master  # TODO: remove
+  # pull_request:
+  #   branches:
+  #     - main
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+permissions:
+  contents: read
+
+jobs:
+
+  Linux:
+    if: true
+    strategy:
+      fail-fast: false
+      matrix:
+        device:
+          - ch4:ucx
+          - ch4:ofi
+          - ch3:nemesis
+          - ch3:sock
+        pm:
+          - hydra
+          - gforker
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+    uses: ./.github/workflows/ci-workflow.yml
+    with:
+      runner: ${{ matrix.runner }}
+      device: ${{ matrix.device }}
+      pm:     ${{ matrix.pm     }}
+
+  macOS:
+    if: true
+    strategy:
+      fail-fast: false
+      matrix:
+        device:
+          - ch4:ofi
+          - ch3:nemesis
+          - ch3:sock
+        pm:
+          - hydra
+          - gforker
+        runner:
+          - macos-26
+          # - macos-26-intel
+    uses: ./.github/workflows/ci-workflow.yml
+    with:
+      runner: ${{ matrix.runner }}
+      device: ${{ matrix.device }}
+      pm:     ${{ matrix.pm     }}

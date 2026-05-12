@@ -1,0 +1,228 @@
+name: ci-workflow
+
+on:  # yamllint disable-line rule:truthy
+  workflow_call:
+    inputs:
+      runner:
+        description: "GitHub runner label"
+        default: 'ubuntu-24.04'
+        required: false
+        type: string
+      device:
+        description: "MPICH Device"
+        default: 'ch4:ucx,ofi'
+        required: false
+        type: string
+      pm:
+        description: "MPICH Process Manager"
+        default: 'hydra:gforker'
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "OS & Architecture"
+        default: 'Linux-x86_64'
+        required: false
+        type: choice
+        options:
+          - Linux-aarch64
+          - Linux-x86_64
+          - macOS-arm64
+          - macOS-x86_64
+      device:
+        description: "MPICH Device"
+        default: 'ch4:ucx,ofi'
+        required: false
+        type: choice
+        options:
+          - ch4:ucx,ofi
+          - ch4:ofi,ucx
+          - ch4:ucx
+          - ch4:ofi
+          - ch3:nemesis
+          - ch3:sock
+      pm:
+        description: "MPICH Process Manager"
+        default: 'hydra:gforker'
+        required: false
+        type: choice
+        options:
+          - hydra:gforker
+          - hydra
+          - gforker
+
+permissions:
+  contents: read
+
+jobs:
+
+  build:
+    outputs:
+      build-tag: ${{ steps.setup.outputs.build-tag }}
+    runs-on: |-
+      ${{ case(
+        inputs.runner == 'Linux-aarch64', 'ubuntu-24.04',
+        inputs.runner == 'Linux-x86_64',  'ubuntu-24.04-arm',
+        inputs.runner == 'macOS-arm64',   'macos-26',
+        inputs.runner == 'macOS-x86_64',  'macos-26-intel',
+        inputs.runner
+      ) }}
+    timeout-minutes: 60
+
+    steps:
+
+    - id: setup
+      name: Setup
+      run: |
+        # build tag
+        system=${{ format('{0}-{1}', runner.os, runner.arch) }}
+        device=$(echo ${{ inputs.device }} | tr ':,' '_')
+        pm=$(echo ${{ inputs.pm }} | tr ':,' '_')
+        echo build-tag="$device-$pm-$system" >> "$GITHUB_OUTPUT"
+        # number of active cores
+        case $(uname) in
+        Linux)  nproc=$(nproc) ;;
+        Darwin) nproc=$(sysctl -n hw.activecpu) ;;
+        esac
+        echo nproc=${nproc:-1} >> "$GITHUB_OUTPUT"
+
+    - if: ${{ runner.os == 'Linux' }}
+      name: Setup Linux
+      run: |
+        # install libnuma-dev
+        sudo apt-get install -y -q libnuma-dev
+
+    - if: ${{ runner.os == 'macOS' }}
+      name: Setup macOS
+      run: |
+        # set MACOSX_DEPLOYMENT_TARGET
+        echo MACOSX_DEPLOYMENT_TARGET=16.0 >> "$GITHUB_ENV"
+        # install autotools
+        brew install autoconf
+        brew install automake
+        brew install libtool
+        # create libtool symlink
+        cd $(brew --prefix)/bin
+        sudo ln -s glibtool libtool
+        sudo ln -s glibtoolize libtoolize
+        # create gfortran symlink
+        cd $(brew --prefix)/bin
+        gfortran=$(ls gfortran-* | sort | head -n 1)
+        sudo ln -s $gfortran gfortran
+
+    - name: Checkout
+      uses: actions/checkout@v6
+      with:
+        repository: 'pmodels/mpich'  # TODO: remove
+        ref: 'refs/pull/7806/head'   # TODO: remove
+        submodules: recursive
+
+    - name: Bootstrap
+      run:  ./autogen.sh
+
+    - name: Configure
+      run:  ./configure
+              --prefix=/opt/mpich
+              --with-pm=${{ inputs.pm }}
+              --with-device=${{ inputs.device }}
+              --disable-dependency-tracking
+              --disable-maintainer-mode
+              --disable-doc
+              --enable-g=all
+              --enable-fast=none
+              --enable-mpi-abi
+              $(test ${{ inputs.pm }} == gforker &&
+                echo --with-namepublisher=file)
+
+    - name: Build
+      run:  make -j ${{ steps.setup.outputs.nproc }}
+
+    - name: Install
+      run:  sudo make install
+
+    - name: Archive artifact
+      run:  tar -cvf mpich.tar /opt/mpich
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: mpich-${{ steps.setup.outputs.build-tag }}
+        path: mpich.tar
+        retention-days: 1
+
+  test:
+    needs: build
+    runs-on: |-
+      ${{ case(
+        inputs.runner == 'Linux-aarch64', 'ubuntu-24.04',
+        inputs.runner == 'Linux-x86_64',  'ubuntu-24.04-arm',
+        inputs.runner == 'macOS-arm64',   'macos-26',
+        inputs.runner == 'macOS-x86_64',  'macos-26-intel',
+        inputs.runner
+      ) }}
+    timeout-minutes: 60
+
+    steps:
+
+    - name: Download artifact
+      uses: actions/download-artifact@v8
+      with:
+        name: mpich-${{ needs.build.outputs.build-tag }}
+
+    - name: Extract artifact
+      run:  sudo tar -xvpf mpich.tar -C /
+
+    - name: Update PATH
+      run:  echo /opt/mpich/bin >> "$GITHUB_PATH"
+
+    - name: Show MPICH version
+      run:  mpichversion
+
+    - name: Show MPI control vars
+      run:  mpivars
+
+    - name: Show MPICC
+      run:  mpicc -show
+
+    - name: Show MPICXX
+      run:  mpicxx -show
+
+    - name: Show MPIFORT
+      run:  mpifort -show
+
+    - name: Hello, World!
+      run: |
+        cat > helloworld.c << EOF
+        #include <mpi.h>
+        #include <stdio.h>
+
+        int main(int argc, char *argv[])
+        {
+          int size, rank, len;
+          char name[MPI_MAX_PROCESSOR_NAME];
+          MPI_Init(&argc, &argv);
+          MPI_Comm_size(MPI_COMM_WORLD, &size);
+          MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+          MPI_Get_processor_name(name, &len);
+          if (rank != 0) {
+            MPI_Recv(NULL, 0 , MPI_BYTE, rank-1, 0, MPI_COMM_WORLD,
+                     MPI_STATUS_IGNORE);
+          }
+          printf("Hello, World! I am process %d of %d on %s.\n",
+                  rank, size, name);
+          if (rank != size - 1) {
+            MPI_Send(NULL, 0 , MPI_BYTE, rank+1, 0, MPI_COMM_WORLD);
+          }
+          MPI_Finalize();
+          return 0;
+        }
+        EOF
+
+        set +x
+
+        mpicc helloworld.c -o helloworld
+        mpiexec -n 5 ./helloworld
+
+        mpicc_abi helloworld.c -o helloworld_abi
+        mpiexec -n 5 ./helloworld_abi
