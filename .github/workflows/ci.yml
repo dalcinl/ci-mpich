@@ -1,0 +1,75 @@
+name: ci
+
+on:  # yamllint disable-line rule:truthy
+  push:
+    branches:
+      - "main"
+      - "[0-9]+.[0-9]+.x"
+  # pull_request:  # TODO: enable?
+  #   branches:
+  #     - "main"
+  #     - "[0-9]+.[0-9]+.x"
+  workflow_dispatch:
+    inputs:
+      linux:
+        description: 'Linux'
+        required: true
+        type: boolean
+        default: true
+      macos:
+        description: 'macOS'
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+permissions:
+  contents: read
+
+jobs:
+
+  Linux:
+    if: ${{ case(inputs != null, inputs.linux, true) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - aarch64
+          - x86_64
+        device:
+          - ch4:ucx
+          - ch4:ofi
+          - ch3:nemesis
+          - ch3:sock
+        pm:
+          - hydra
+          - gforker
+    uses: ./.github/workflows/ci-workflow.yml
+    with:
+      runner: Linux-${{ matrix.arch }}
+      device: ${{ matrix.device }}
+      pm:     ${{ matrix.pm     }}
+
+  macOS:
+    if: ${{ case(inputs != null, inputs.macos, true) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - arm64
+          - x86_64
+        device:
+          - ch4:ofi
+          - ch3:nemesis
+          - ch3:sock
+        pm:
+          - hydra
+          - gforker
+    uses: ./.github/workflows/ci-workflow.yml
+    with:
+      runner: macOS-${{ matrix.arch }}
+      device: ${{ matrix.device }}
+      pm:     ${{ matrix.pm     }}
